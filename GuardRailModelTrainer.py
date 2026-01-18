@@ -1,5 +1,4 @@
 import json
-import torch
 from datasets import Dataset
 from transformers import (
     DistilBertTokenizerFast,
@@ -8,20 +7,19 @@ from transformers import (
     TrainingArguments
 )
 from sklearn.metrics import precision_recall_fscore_support, accuracy_score
+from labels import LABELS
 
-# ================= CONFIG =================
 MODEL_NAME = "distilbert-base-uncased"
 MAX_LENGTH = 128
 EPOCHS = 3
 BATCH_SIZE = 16
 LR = 2e-5
 
-LABELS = ["SAFE", "PROMPT_INJECTION"]
-# =========================================
+label2id = {l: i for i, l in enumerate(LABELS)}
+id2label = {i: l for l, i in label2id.items()}
 
-label2id = {label: i for i, label in enumerate(LABELS)}
-id2label = {i: label for label, i in label2id.items()}
 
+tokenizer = DistilBertTokenizerFast.from_pretrained(MODEL_NAME)
 
 def load_jsonl(path):
     texts, labels = [], []
@@ -59,55 +57,53 @@ def compute_metrics(pred):
         "f1": f1
     }
 
+def train_model():
+    train_ds = load_jsonl("train.jsonl")
+    val_ds = load_jsonl("val.jsonl")
 
-# ---------- Load data ----------
-train_ds = load_jsonl("train.jsonl")
-val_ds = load_jsonl("val.jsonl")
 
-tokenizer = DistilBertTokenizerFast.from_pretrained(MODEL_NAME)
+    train_ds = train_ds.map(tokenize, batched=True)
+    val_ds = val_ds.map(tokenize, batched=True)
 
-train_ds = train_ds.map(tokenize, batched=True)
-val_ds = val_ds.map(tokenize, batched=True)
+    train_ds.set_format("torch", columns=["input_ids", "attention_mask", "label"])
+    val_ds.set_format("torch", columns=["input_ids", "attention_mask", "label"])
 
-train_ds.set_format("torch", columns=["input_ids", "attention_mask", "label"])
-val_ds.set_format("torch", columns=["input_ids", "attention_mask", "label"])
+    model = DistilBertForSequenceClassification.from_pretrained(
+        MODEL_NAME,
+        num_labels=len(LABELS),
+        id2label=id2label,
+        label2id=label2id
+    )
 
-# ---------- Model ----------
-model = DistilBertForSequenceClassification.from_pretrained(
-    MODEL_NAME,
-    num_labels=len(LABELS),
-    id2label=id2label,
-    label2id=label2id
-)
+    args = TrainingArguments(
+        output_dir="./guardrail_model_2",
+        eval_strategy="epoch",
+        save_strategy="epoch",
+        learning_rate=LR,
+        per_device_train_batch_size=BATCH_SIZE,
+        per_device_eval_batch_size=BATCH_SIZE,
+        num_train_epochs=EPOCHS,
+        load_best_model_at_end=True,
+        metric_for_best_model="precision",
+        greater_is_better=True,
+        logging_steps=50
+    )
 
-# ---------- Training ----------
-args = TrainingArguments(
-    output_dir="./guardrail_model",
-    eval_strategy="epoch",
-    save_strategy="epoch",
-    learning_rate=LR,
-    per_device_train_batch_size=BATCH_SIZE,
-    per_device_eval_batch_size=BATCH_SIZE,
-    num_train_epochs=EPOCHS,
-    load_best_model_at_end=True,
-    metric_for_best_model="precision",
-    greater_is_better=True,
-    logging_steps=50
-)
+    trainer = Trainer(
+        model=model,
+        args=args,
+        train_dataset=train_ds,
+        eval_dataset=val_ds,
+        tokenizer=tokenizer,
+        compute_metrics=compute_metrics
+    )
 
-trainer = Trainer(
-    model=model,
-    args=args,
-    train_dataset=train_ds,
-    eval_dataset=val_ds,
-    tokenizer=tokenizer,
-    compute_metrics=compute_metrics
-)
+    trainer.train()
+    trainer.save_model("./guardrail_model_2")
+    tokenizer.save_pretrained("./guardrail_model_2")
 
-trainer.train()
+    print("✅ Guardrail model trained successfully")
+    print("Labels:", LABELS)
 
-trainer.save_model("./guardrail_model")
-tokenizer.save_pretrained("./guardrail_model")
-
-print("✅ Guardrail model trained successfully")
-print("Labels:", LABELS)
+if __name__ == "__main__":
+    train_model()
